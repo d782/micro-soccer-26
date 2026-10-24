@@ -59,9 +59,11 @@ export class Preloader extends Phaser.Scene {
     // Imagen de portada del menú principal
     this.load.image('menu_banner', 'backgrounds/Imagen pegada.png');
 
-    // Sonidos de UI
+    // Sonidos de UI, música del menú principal y efecto de gol
     this.load.audio('ui_click', 'ui/Sounds/click-a.ogg');
     this.load.audio('ui_tap', 'ui/Sounds/tap-a.ogg');
+    this.load.audio('menu_music', 'sounds/menu.mp3');
+    this.load.audio('goal_sfx', 'sounds/gol.mp3');
   }
 
   create(): void {

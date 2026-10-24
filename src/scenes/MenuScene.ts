@@ -22,6 +22,8 @@ export class MenuScene extends Phaser.Scene {
     this.joinCode = '';
     this.cursorBlink = true;
 
+    this.startMenuMusic();
+
     const { width, height } = this.scale;
 
     // 1. Fondo de cancha estilizada con franjas de césped y círculo central
@@ -361,5 +363,30 @@ export class MenuScene extends Phaser.Scene {
       this.statusText.setText(msg);
       this.statusText.setColor('#f87171');
     }
+  }
+
+  private startMenuMusic(): void {
+    this.sound.pauseOnBlur = false;
+    if (!this.cache.audio.exists('menu_music')) return;
+
+    let music = this.sound.get('menu_music');
+    if (!music) {
+      music = this.sound.add('menu_music', { loop: true, volume: 0.55 });
+    }
+
+    const tryPlay = () => {
+      if (!music.isPlaying && !this.scene.isActive('MainScene')) {
+        music.play();
+      }
+    };
+
+    if (!this.sound.locked) {
+      tryPlay();
+    } else {
+      this.sound.once(Phaser.Sound.Events.UNLOCKED, tryPlay);
+    }
+
+    this.input.once('pointerdown', tryPlay);
+    this.input.keyboard?.once('keydown', tryPlay);
   }
 }

@@ -15,13 +15,14 @@ COPY public ./public
 COPY sports-pack ./sports-pack
 COPY ui ./ui
 COPY backgrounds ./backgrounds
+COPY sounds ./sounds
 COPY src ./src
 
 # Compilar TypeScript y generar el bundle de producción en /app/dist
 RUN npm run build
 
 # Asegurar que las carpetas estáticas de assets estén presentes dentro de /app/dist
-RUN cp -r sports-pack ui backgrounds /app/dist/
+RUN cp -r sports-pack ui backgrounds sounds /app/dist/
 
 # ==========================================
 # Etapa 2: Servidor de Producción (Nginx Alpine)

@@ -146,6 +146,11 @@ export class MainScene extends Phaser.Scene {
   create(): void {
     this.cameras.main.fadeIn(250, 15, 23, 42);
 
+    const menuMusic = this.sound.get('menu_music');
+    if (menuMusic && menuMusic.isPlaying) {
+      menuMusic.stop();
+    }
+
     this.remainingTimeMs = this.matchDurationMs;
     this.blueScore = 0;
     this.redScore = 0;
@@ -690,6 +695,31 @@ export class MainScene extends Phaser.Scene {
       .addState('GOAL_CELEBRATION', {
         name: 'GOAL_CELEBRATION',
         onEnter: (scene) => {
+          if (scene.cache.audio.exists('goal_sfx')) {
+            scene.sound.stopByKey('goal_sfx');
+            const goalSfx = scene.sound.add('goal_sfx');
+            goalSfx.addMarker({
+              name: 'goal_roar',
+              start: 0.95,
+              duration: 2.4,
+              config: { volume: 0.85 }
+            });
+            goalSfx.play('goal_roar');
+
+            scene.tweens.add({
+              targets: goalSfx,
+              volume: 0,
+              delay: 1800,
+              duration: 550,
+              onComplete: () => {
+                if (goalSfx.isPlaying) {
+                  goalSfx.stop();
+                }
+                goalSfx.destroy();
+              }
+            });
+          }
+
           if (scene.ball.owner) {
             const owner = scene.ball.owner;
             scene.ball.release(
@@ -1217,6 +1247,10 @@ export class MainScene extends Phaser.Scene {
 
     this.checkShotTrajectoryInterception();
     this.ball.updateBall(delta);
+
+    if (this.ball.enteredGoalThroughFront !== null && this.matchFsm.isInState('PLAYING')) {
+      this.onGoalSensorTriggered(this.ball.enteredGoalThroughFront);
+    }
 
     // Emitir estado autoritativo (Host -> Clientes)
     if (peerManager.isOnlineSession && peerManager.isHost) {
