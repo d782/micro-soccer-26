@@ -48,9 +48,55 @@
         justify-content: center;
         align-items: center;
       }
+      #orientation-warning {
+        display: none;
+        position: fixed;
+        inset: 0;
+        background-color: #0b1320;
+        color: #ffffff;
+        z-index: 999999;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+        text-align: center;
+        padding: 24px;
+        font-family: 'KenneyFuture', sans-serif;
+      }
+      #orientation-warning .rotate-icon {
+        font-size: 52px;
+        margin-bottom: 20px;
+        animation: rotatePhone 2s infinite ease-in-out;
+      }
+      #orientation-warning h2 {
+        font-size: 24px;
+        margin-bottom: 12px;
+        color: #facc15;
+      }
+      #orientation-warning p {
+        font-size: 14px;
+        color: #cbd5e1;
+        max-width: 320px;
+        line-height: 1.5;
+        font-family: sans-serif;
+      }
+      @keyframes rotatePhone {
+        0% { transform: rotate(0deg); }
+        50% { transform: rotate(-90deg); }
+        100% { transform: rotate(0deg); }
+      }
+      @media screen and (orientation: portrait) and (max-width: 900px) {
+        #orientation-warning {
+          display: flex;
+        }
+      }
     </style>
   </head>
   <body>
+    <div id="orientation-warning">
+      <div class="rotate-icon">📱</div>
+      <h2>GIRA TU TELÉFONO</h2>
+      <p>Para ver la cancha a pantalla completa y jugar cómodamente, coloca tu teléfono en posición horizontal.</p>
+    </div>
     <div id="game-container"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>

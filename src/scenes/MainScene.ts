@@ -84,7 +84,12 @@ export class MainScene extends Phaser.Scene {
   private goalBannerText!: Phaser.GameObjects.Text;
   private fsmStatusText!: Phaser.GameObjects.Text;
 
-  // Joystick virtual analógico (Multi-touch independiente en mitad izquierda) y botonera táctil derecha
+  // Detección de dispositivo móvil vs PC
+  private isMobile = false;
+  private cameraMode: 'cancha' | 'accion' = 'cancha';
+  private camTarget = new Phaser.Math.Vector2(640, 360);
+
+  // Joystick virtual analógico (Multi-touch independiente en mitad izquierda) y botonera táctil derecha (solo en móviles)
   private isPointerDown = false;
   private stickPointerId: number | null = null;
   private readonly stickDefaultPos = new Phaser.Math.Vector2(150, 545);
@@ -178,8 +183,11 @@ export class MainScene extends Phaser.Scene {
     this.controllersByPeerId.clear();
     this.guestInputsByPeerId.clear();
 
-    // Habilitar punteros multitáctiles simultáneos (pulgar izquierdo en palanca + pulgar derecho en botones de acción)
-    this.input.addPointer(3);
+    // Detección: solo activar punteros multitáctiles y controles en pantalla si es un dispositivo móvil real
+    this.isMobile = this.checkIsMobileDevice();
+    if (this.isMobile) {
+      this.input.addPointer(3);
+    }
 
     // 1. Crear y renderizar la cancha
     this.pitch = new Pitch(this, {
@@ -312,39 +320,49 @@ export class MainScene extends Phaser.Scene {
       this.onGoalSensorTriggered('right');
     });
 
-    // Joystick analógico virtual multitáctil (mitad izquierda de la pantalla) + Botonera táctil derecha (4 acciones)
+    // Joystick analógico virtual multitáctil + Botonera táctil derecha (SOLO en dispositivos móviles)
     this.stickGraphics = this.add.graphics().setDepth(100);
-    this.createMobileActionButtons();
 
-    this.input.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
-      if (this.matchFsm?.isInState('FULL_TIME')) return;
-      // Solo activar la palanca de movimiento si el toque ocurre en la mitad izquierda y no hay otro dedo ya en la palanca
-      if (pointer.x < this.scale.width * 0.52 && this.stickPointerId === null) {
-        this.stickPointerId = pointer.id;
-        this.isPointerDown = true;
-        this.stickOrigin.set(pointer.x, pointer.y);
-        this.stickCurrent.set(pointer.x, pointer.y);
-      }
-    });
+    if (this.isMobile) {
+      this.createMobileActionButtons();
 
-    this.input.on('pointermove', (pointer: Phaser.Input.Pointer) => {
-      if (this.isPointerDown && pointer.id === this.stickPointerId) {
-        this.stickCurrent.set(pointer.x, pointer.y);
-      }
-    });
+      this.input.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
+        if (this.matchFsm?.isInState('FULL_TIME')) return;
+        // Solo activar la palanca de movimiento si el toque ocurre en la mitad izquierda y no hay otro dedo ya en la palanca
+        if (pointer.x < this.scale.width * 0.52 && this.stickPointerId === null) {
+          this.stickPointerId = pointer.id;
+          this.isPointerDown = true;
+          this.stickOrigin.set(pointer.x, pointer.y);
+          this.stickCurrent.set(pointer.x, pointer.y);
+        }
+      });
 
-    const releasePointer = (pointer: Phaser.Input.Pointer) => {
-      if (pointer.id === this.stickPointerId) {
-        this.isPointerDown = false;
-        this.stickPointerId = null;
-        this.stickOrigin.copy(this.stickDefaultPos);
-        this.stickCurrent.copy(this.stickDefaultPos);
-      }
-      this.releaseTouchActionPointer(pointer.id);
-    };
+      this.input.on('pointermove', (pointer: Phaser.Input.Pointer) => {
+        if (this.isPointerDown && pointer.id === this.stickPointerId) {
+          this.stickCurrent.set(pointer.x, pointer.y);
+        }
+      });
 
-    this.input.on('pointerup', releasePointer);
-    this.input.on('pointerupoutside', releasePointer);
+      const releasePointer = (pointer: Phaser.Input.Pointer) => {
+        if (pointer.id === this.stickPointerId) {
+          this.isPointerDown = false;
+          this.stickPointerId = null;
+          this.stickOrigin.copy(this.stickDefaultPos);
+          this.stickCurrent.copy(this.stickDefaultPos);
+        }
+        this.releaseTouchActionPointer(pointer.id);
+      };
+
+      this.input.on('pointerup', releasePointer);
+      this.input.on('pointerupoutside', releasePointer);
+
+      // En móviles ampliamos la vista de la cancha (zoom 1.18x) para eliminar márgenes vacíos y ver jugadores grandes
+      this.cameras.main.setZoom(1.18);
+      this.cameras.main.centerOn(640, 360);
+    } else {
+      this.cameras.main.setZoom(1.0);
+      this.cameras.main.centerOn(640, 360);
+    }
 
     // 5. HUD: Marcador (AZUL vs ROJO), Temporizador de partido (3:00), controles unificados e indicador FSM
     this.createHud();
@@ -866,20 +884,79 @@ export class MainScene extends Phaser.Scene {
       .setOrigin(1, 0.5)
       .setDepth(31);
 
-    this.add
-      .text(
-        this.pitch.bounds.right,
-        29,
-        '[WASD / FLECHAS] Mover  |  [J/X/1] Corto  |  [K/Z/2] Vacío  |  [L/C/3] Largo  |  [ESPACIO/V/4] Tiro',
-        {
+    if (!this.isMobile) {
+      this.add
+        .text(
+          this.pitch.bounds.right,
+          29,
+          '[WASD / FLECHAS] Mover  |  [J/X/1] Corto  |  [K/Z/2] Vacío  |  [L/C/3] Largo  |  [ESPACIO/V/4] Tiro',
+          {
+            fontFamily: 'sans-serif',
+            fontSize: '13px',
+            fontStyle: 'bold',
+            color: '#e2e8f0'
+          }
+        )
+        .setOrigin(1, 0.5)
+        .setAlpha(0.95);
+    } else {
+      // Botón de pantalla completa en móvil para colapsar barras del navegador
+      const fsBtn = this.add
+        .nineslice(this.pitch.bounds.right - 10, 29, 'ui_panel_grey', undefined, 140, 36, 10, 10, 10, 10)
+        .setOrigin(1, 0.5)
+        .setDepth(31)
+        .setInteractive({ useHandCursor: true });
+
+      const fsTxt = this.add
+        .text(this.pitch.bounds.right - 80, 29, '⛶ PANTALLA', {
           fontFamily: 'sans-serif',
-          fontSize: '13px',
+          fontSize: '12px',
           fontStyle: 'bold',
-          color: '#e2e8f0'
+          color: '#0f172a'
+        })
+        .setOrigin(0.5)
+        .setDepth(32);
+
+      fsBtn.on('pointerup', () => {
+        if (this.scale.isFullscreen) {
+          this.scale.stopFullscreen();
+          fsTxt.setText('⛶ PANTALLA');
+        } else {
+          this.scale.startFullscreen();
+          fsTxt.setText('✕ SALIR');
         }
-      )
-      .setOrigin(1, 0.5)
-      .setAlpha(0.95);
+      });
+
+      // Botón de cámara (Zoom Cancha Completa 1.18x vs Acción Dinámica 1.38x)
+      const camBtn = this.add
+        .nineslice(this.pitch.bounds.right - 165, 29, 'ui_panel_grey', undefined, 140, 36, 10, 10, 10, 10)
+        .setOrigin(1, 0.5)
+        .setDepth(31)
+        .setInteractive({ useHandCursor: true });
+
+      const camTxt = this.add
+        .text(this.pitch.bounds.right - 235, 29, '🔍 CANCHA', {
+          fontFamily: 'sans-serif',
+          fontSize: '12px',
+          fontStyle: 'bold',
+          color: '#0f172a'
+        })
+        .setOrigin(0.5)
+        .setDepth(32);
+
+      camBtn.on('pointerup', () => {
+        if (this.cameraMode === 'cancha') {
+          this.cameraMode = 'accion';
+          this.cameras.main.setZoom(1.38);
+          camTxt.setText('🎥 ACCIÓN');
+        } else {
+          this.cameraMode = 'cancha';
+          this.cameras.main.setZoom(1.18);
+          this.cameras.main.centerOn(640, 360);
+          camTxt.setText('🔍 CANCHA');
+        }
+      });
+    }
 
     this.fsmStatusText = this.add
       .text(64, 686, '', {
@@ -1378,7 +1455,15 @@ export class MainScene extends Phaser.Scene {
       this.stepAuthoritativeHost(delta);
     }
 
-    this.renderVirtualStick();
+    if (this.isMobile) {
+      if (this.cameraMode === 'accion') {
+        this.updateMobileCameraFollow();
+      }
+      this.renderVirtualStick();
+    } else {
+      this.stickGraphics.clear();
+    }
+
     this.updateFsmHud();
   }
 
@@ -1621,7 +1706,7 @@ export class MainScene extends Phaser.Scene {
   ): void {
     ctrl.analogVector.set(0, 0);
 
-    if (allowPointerStick && this.isPointerDown) {
+    if (this.isMobile && allowPointerStick && this.isPointerDown) {
       const dx = this.stickCurrent.x - this.stickOrigin.x;
       const dy = this.stickCurrent.y - this.stickOrigin.y;
       const dist = Math.hypot(dx, dy);
@@ -1663,6 +1748,30 @@ export class MainScene extends Phaser.Scene {
     }
   }
 
+  private updateMobileCameraFollow(): void {
+    const localPlayer = this.getLocalController()?.player;
+    if (!localPlayer) return;
+
+    const targetX = Phaser.Math.Linear(localPlayer.x, this.ball.x, 0.45);
+    const targetY = Phaser.Math.Linear(localPlayer.y, this.ball.y, 0.45);
+
+    const b = this.pitch.bounds;
+    const clampedX = Phaser.Math.Clamp(targetX, b.left + 160, b.right - 160);
+    const clampedY = Phaser.Math.Clamp(targetY, b.top + 100, b.bottom - 100);
+
+    this.camTarget.x = Phaser.Math.Linear(this.camTarget.x, clampedX, 0.08);
+    this.camTarget.y = Phaser.Math.Linear(this.camTarget.y, clampedY, 0.08);
+    this.cameras.main.centerOn(this.camTarget.x, this.camTarget.y);
+  }
+
+  private checkIsMobileDevice(): boolean {
+    if (typeof window === 'undefined') return false;
+    const ua = navigator.userAgent || '';
+    const isMobileUA = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua);
+    const hasTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+    return isMobileUA || (hasTouch && !this.sys.game.device.os.desktop);
+  }
+
   private updateFsmHud(): void {
     const mState = this.matchFsm.getStateName() ?? 'NONE';
     const localPlayer = this.getLocalController()?.player ?? this.controllers[0]?.player;
@@ -1681,6 +1790,7 @@ export class MainScene extends Phaser.Scene {
 
   private renderVirtualStick(): void {
     this.stickGraphics.clear();
+    if (!this.isMobile) return;
 
     if (!this.isPointerDown) {
       // Base táctil de reposo translúcida en la esquina inferior izquierda
