@@ -281,6 +281,12 @@ export class SkillScene extends Phaser.Scene {
 
     hitZone.on('pointerdown', () => {
       this.isNameInputFocused = true;
+      if (!this.sys.game.device.os.desktop) {
+        const entered = window.prompt('Ingresa el nombre de tu jugador:', this.playerName);
+        if (entered !== null) {
+          this.playerName = entered.trim().toUpperCase().slice(0, 14) || 'JUGADOR';
+        }
+      }
       this.renderNameInputBox(boxX, boxY, boxWidth, boxHeight);
     });
 

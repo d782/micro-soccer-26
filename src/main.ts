@@ -17,7 +17,8 @@ const config: Phaser.Types.Core.GameConfig = {
     autoCenter: Phaser.Scale.CENTER_BOTH
   },
   input: {
-    gamepad: true
+    gamepad: true,
+    activePointers: 4
   },
   physics: {
     default: 'arcade',

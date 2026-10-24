@@ -23,6 +23,17 @@ interface MoveBinding {
   label: string;
   keys: Phaser.Input.Keyboard.Key[];
   wasDown: boolean;
+  isTouchDown: boolean;
+  activeTouchPointers: Set<number>;
+}
+
+interface TouchActionButtonUI {
+  type: MoveType;
+  container: Phaser.GameObjects.Container;
+  bgCircle: Phaser.GameObjects.Graphics;
+  radius: number;
+  color: number;
+  activePointers: Set<number>;
 }
 
 interface DirectionalKeySet {
@@ -73,12 +84,15 @@ export class MainScene extends Phaser.Scene {
   private goalBannerText!: Phaser.GameObjects.Text;
   private fsmStatusText!: Phaser.GameObjects.Text;
 
-  // Joystick virtual analógico (Mouse / Touch opcional para el jugador local)
+  // Joystick virtual analógico (Multi-touch independiente en mitad izquierda) y botonera táctil derecha
   private isPointerDown = false;
-  private stickOrigin = new Phaser.Math.Vector2(0, 0);
-  private stickCurrent = new Phaser.Math.Vector2(0, 0);
+  private stickPointerId: number | null = null;
+  private readonly stickDefaultPos = new Phaser.Math.Vector2(150, 545);
+  private stickOrigin = new Phaser.Math.Vector2(150, 545);
+  private stickCurrent = new Phaser.Math.Vector2(150, 545);
   private readonly stickMaxRadius = 65;
   private stickGraphics!: Phaser.GameObjects.Graphics;
+  private touchActionButtons: TouchActionButtonUI[] = [];
 
   // Estado de red para arquitectura Host-Authoritative (soporta de 2 hasta 8 jugadores: 1v1, 2v1, 3v2, 4v4)
   private guestInputsByPeerId: Map<string, RemoteInputPayload> = new Map();
@@ -156,9 +170,16 @@ export class MainScene extends Phaser.Scene {
     this.redScore = 0;
     this.lastGoalScoringTeam = null;
     this.isPointerDown = false;
+    this.stickPointerId = null;
+    this.stickOrigin.copy(this.stickDefaultPos);
+    this.stickCurrent.copy(this.stickDefaultPos);
+    this.touchActionButtons = [];
     this.controllers = [];
     this.controllersByPeerId.clear();
     this.guestInputsByPeerId.clear();
+
+    // Habilitar punteros multitáctiles simultáneos (pulgar izquierdo en palanca + pulgar derecho en botones de acción)
+    this.input.addPointer(3);
 
     // 1. Crear y renderizar la cancha
     this.pitch = new Pitch(this, {
@@ -291,26 +312,39 @@ export class MainScene extends Phaser.Scene {
       this.onGoalSensorTriggered('right');
     });
 
-    // Joystick analógico virtual opcional con ratón / pantalla táctil
+    // Joystick analógico virtual multitáctil (mitad izquierda de la pantalla) + Botonera táctil derecha (4 acciones)
     this.stickGraphics = this.add.graphics().setDepth(100);
+    this.createMobileActionButtons();
 
     this.input.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
       if (this.matchFsm?.isInState('FULL_TIME')) return;
-      this.isPointerDown = true;
-      this.stickOrigin.set(pointer.x, pointer.y);
-      this.stickCurrent.set(pointer.x, pointer.y);
-    });
-
-    this.input.on('pointermove', (pointer: Phaser.Input.Pointer) => {
-      if (this.isPointerDown) {
+      // Solo activar la palanca de movimiento si el toque ocurre en la mitad izquierda y no hay otro dedo ya en la palanca
+      if (pointer.x < this.scale.width * 0.52 && this.stickPointerId === null) {
+        this.stickPointerId = pointer.id;
+        this.isPointerDown = true;
+        this.stickOrigin.set(pointer.x, pointer.y);
         this.stickCurrent.set(pointer.x, pointer.y);
       }
     });
 
-    this.input.on('pointerup', () => {
-      this.isPointerDown = false;
-      this.stickGraphics.clear();
+    this.input.on('pointermove', (pointer: Phaser.Input.Pointer) => {
+      if (this.isPointerDown && pointer.id === this.stickPointerId) {
+        this.stickCurrent.set(pointer.x, pointer.y);
+      }
     });
+
+    const releasePointer = (pointer: Phaser.Input.Pointer) => {
+      if (pointer.id === this.stickPointerId) {
+        this.isPointerDown = false;
+        this.stickPointerId = null;
+        this.stickOrigin.copy(this.stickDefaultPos);
+        this.stickCurrent.copy(this.stickDefaultPos);
+      }
+      this.releaseTouchActionPointer(pointer.id);
+    };
+
+    this.input.on('pointerup', releasePointer);
+    this.input.on('pointerupoutside', releasePointer);
 
     // 5. HUD: Marcador (AZUL vs ROJO), Temporizador de partido (3:00), controles unificados e indicador FSM
     this.createHud();
@@ -381,101 +415,299 @@ export class MainScene extends Phaser.Scene {
   }
 
   private setupLocalPlayerControls(): void {
-    if (!this.input.keyboard) return;
+    const localCtrl = this.getLocalController();
+    if (!localCtrl) return;
 
     const kb = this.input.keyboard;
     const KC = Phaser.Input.Keyboard.KeyCodes;
 
-    kb.addCapture([
-      KC.W,
-      KC.A,
-      KC.S,
-      KC.D,
-      KC.UP,
-      KC.DOWN,
-      KC.LEFT,
-      KC.RIGHT,
-      KC.SPACE,
-      KC.J,
-      KC.K,
-      KC.L,
-      KC.X,
-      KC.Z,
-      KC.C,
-      KC.V,
-      KC.ONE,
-      KC.TWO,
-      KC.THREE,
-      KC.FOUR,
-      KC.ENTER,
-      KC.M,
-      KC.NUMPAD_ZERO,
-      KC.NUMPAD_ONE,
-      KC.NUMPAD_TWO,
-      KC.NUMPAD_THREE
-    ]);
+    if (kb) {
+      kb.addCapture([
+        KC.W,
+        KC.A,
+        KC.S,
+        KC.D,
+        KC.UP,
+        KC.DOWN,
+        KC.LEFT,
+        KC.RIGHT,
+        KC.SPACE,
+        KC.J,
+        KC.K,
+        KC.L,
+        KC.X,
+        KC.Z,
+        KC.C,
+        KC.V,
+        KC.ONE,
+        KC.TWO,
+        KC.THREE,
+        KC.FOUR,
+        KC.ENTER,
+        KC.M,
+        KC.NUMPAD_ZERO,
+        KC.NUMPAD_ONE,
+        KC.NUMPAD_TWO,
+        KC.NUMPAD_THREE
+      ]);
 
-    const cursors = kb.createCursorKeys();
+      const cursors = kb.createCursorKeys();
+      localCtrl.moveKeys = {
+        up: [kb.addKey(KC.W), cursors.up],
+        down: [kb.addKey(KC.S), cursors.down],
+        left: [kb.addKey(KC.A), cursors.left],
+        right: [kb.addKey(KC.D), cursors.right]
+      };
+    }
 
-    // Esquema de controles UNIFICADO para el jugador local en su propio equipo/teclado
-    const localCtrl = this.getLocalController();
-    if (!localCtrl) return;
-
-    localCtrl.moveKeys = {
-      up: [kb.addKey(KC.W), cursors.up],
-      down: [kb.addKey(KC.S), cursors.down],
-      left: [kb.addKey(KC.A), cursors.left],
-      right: [kb.addKey(KC.D), cursors.right]
-    };
-
+    // Esquema de controles UNIFICADO para teclado + botones táctiles móviles
     localCtrl.bindings = [
       {
         type: 'short_pass',
         label: 'TOQUE CORTO',
-        keys: [
-          kb.addKey(KC.J),
-          kb.addKey(KC.X),
-          kb.addKey(KC.ONE),
-          kb.addKey(KC.NUMPAD_ONE)
-        ],
-        wasDown: false
+        keys: kb
+          ? [
+              kb.addKey(KC.J),
+              kb.addKey(KC.X),
+              kb.addKey(KC.ONE),
+              kb.addKey(KC.NUMPAD_ONE)
+            ]
+          : [],
+        wasDown: false,
+        isTouchDown: false,
+        activeTouchPointers: new Set<number>()
       },
       {
         type: 'through_pass',
         label: 'PASE AL VACÍO',
-        keys: [
-          kb.addKey(KC.K),
-          kb.addKey(KC.Z),
-          kb.addKey(KC.TWO),
-          kb.addKey(KC.NUMPAD_TWO)
-        ],
-        wasDown: false
+        keys: kb
+          ? [
+              kb.addKey(KC.K),
+              kb.addKey(KC.Z),
+              kb.addKey(KC.TWO),
+              kb.addKey(KC.NUMPAD_TWO)
+            ]
+          : [],
+        wasDown: false,
+        isTouchDown: false,
+        activeTouchPointers: new Set<number>()
       },
       {
         type: 'long_pass',
         label: 'PASE LARGO',
-        keys: [
-          kb.addKey(KC.L),
-          kb.addKey(KC.C),
-          kb.addKey(KC.THREE),
-          kb.addKey(KC.NUMPAD_THREE)
-        ],
-        wasDown: false
+        keys: kb
+          ? [
+              kb.addKey(KC.L),
+              kb.addKey(KC.C),
+              kb.addKey(KC.THREE),
+              kb.addKey(KC.NUMPAD_THREE)
+            ]
+          : [],
+        wasDown: false,
+        isTouchDown: false,
+        activeTouchPointers: new Set<number>()
       },
       {
         type: 'shoot',
         label: 'TIRO',
-        keys: [
-          kb.addKey(KC.SPACE),
-          kb.addKey(KC.V),
-          kb.addKey(KC.FOUR),
-          kb.addKey(KC.ENTER),
-          kb.addKey(KC.M),
-          kb.addKey(KC.NUMPAD_ZERO)
-        ],
-        wasDown: false
+        keys: kb
+          ? [
+              kb.addKey(KC.SPACE),
+              kb.addKey(KC.V),
+              kb.addKey(KC.FOUR),
+              kb.addKey(KC.ENTER),
+              kb.addKey(KC.M),
+              kb.addKey(KC.NUMPAD_ZERO)
+            ]
+          : [],
+        wasDown: false,
+        isTouchDown: false,
+        activeTouchPointers: new Set<number>()
       }
     ];
+  }
+
+  /**
+   * Crea la botonera táctil derecha en formato diamante arcade para dispositivos móviles y pantallas táctiles:
+   * - Soporta mantener presionado cualquier botón para cargar la barra de potencia (CHARGING) mientras el pulgar izquierdo mueve al jugador en 360°, y patear al soltar (KICKING).
+   */
+  private createMobileActionButtons(): void {
+    const buttonConfigs: Array<{
+      type: MoveType;
+      title: string;
+      subtitle: string;
+      x: number;
+      y: number;
+      radius: number;
+      color: number;
+    }> = [
+      {
+        type: 'short_pass',
+        title: 'CORTO',
+        subtitle: 'PASE',
+        x: 1096,
+        y: 614,
+        radius: 34,
+        color: 0x22c55e
+      },
+      {
+        type: 'through_pass',
+        title: 'VACÍO',
+        subtitle: 'FILTRAR',
+        x: 1020,
+        y: 546,
+        radius: 34,
+        color: 0x38bdf8
+      },
+      {
+        type: 'long_pass',
+        title: 'LARGO',
+        subtitle: 'GLOBO',
+        x: 1096,
+        y: 478,
+        radius: 34,
+        color: 0xfacc15
+      },
+      {
+        type: 'shoot',
+        title: 'TIRO',
+        subtitle: 'PATEAR',
+        x: 1176,
+        y: 546,
+        radius: 39,
+        color: 0xef4444
+      }
+    ];
+
+    for (const cfg of buttonConfigs) {
+      const container = this.add.container(cfg.x, cfg.y).setDepth(100);
+      const bgCircle = this.add.graphics();
+      this.drawTouchButtonCircle(bgCircle, cfg.radius, cfg.color, false);
+
+      const titleTxt = this.add
+        .text(0, -5, cfg.title, {
+          fontFamily: 'KenneyFutureNarrow, sans-serif',
+          fontSize: cfg.type === 'shoot' ? '14px' : '12px',
+          fontStyle: 'bold',
+          color: '#ffffff',
+          stroke: '#0f172a',
+          strokeThickness: 3
+        })
+        .setOrigin(0.5);
+
+      const subTxt = this.add
+        .text(0, 10, cfg.subtitle, {
+          fontFamily: 'sans-serif',
+          fontSize: '9px',
+          fontStyle: 'bold',
+          color: '#e2e8f0',
+          stroke: '#0f172a',
+          strokeThickness: 2
+        })
+        .setOrigin(0.5);
+
+      // Zona táctil ligeramente ampliada (+8px de radio) para facilitar el toque con el pulgar en móviles
+      const hitRadius = cfg.radius + 8;
+      const hitZone = this.add
+        .zone(0, 0, hitRadius * 2, hitRadius * 2)
+        .setInteractive(new Phaser.Geom.Circle(hitRadius, hitRadius, hitRadius), Phaser.Geom.Circle.Contains);
+
+      container.add([bgCircle, titleTxt, subTxt, hitZone]);
+
+      const btnUI: TouchActionButtonUI = {
+        type: cfg.type,
+        container,
+        bgCircle,
+        radius: cfg.radius,
+        color: cfg.color,
+        activePointers: new Set<number>()
+      };
+
+      hitZone.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
+        if (this.matchFsm?.isInState('FULL_TIME')) return;
+        this.pressTouchActionButton(btnUI, pointer.id);
+      });
+
+      hitZone.on('pointerup', (pointer: Phaser.Input.Pointer) => {
+        this.releaseTouchActionButton(btnUI, pointer.id);
+      });
+
+      hitZone.on('pointerout', (pointer: Phaser.Input.Pointer) => {
+        this.releaseTouchActionButton(btnUI, pointer.id);
+      });
+
+      this.touchActionButtons.push(btnUI);
+    }
+  }
+
+  private drawTouchButtonCircle(
+    g: Phaser.GameObjects.Graphics,
+    radius: number,
+    color: number,
+    isPressed: boolean
+  ): void {
+    g.clear();
+    // Sombra exterior suave
+    g.fillStyle(0x0f172a, isPressed ? 0.68 : 0.42);
+    g.fillCircle(0, 2, radius + 2);
+
+    // Relleno circular translúcido con el color de la acción
+    g.fillStyle(color, isPressed ? 0.92 : 0.56);
+    g.fillCircle(0, 0, radius);
+
+    // Borde circular brillante
+    g.lineStyle(isPressed ? 3.5 : 2.5, 0xffffff, isPressed ? 1 : 0.78);
+    g.strokeCircle(0, 0, radius);
+  }
+
+  private pressTouchActionButton(btn: TouchActionButtonUI, pointerId: number): void {
+    btn.activePointers.add(pointerId);
+    btn.container.setScale(0.92);
+    this.drawTouchButtonCircle(btn.bgCircle, btn.radius, btn.color, true);
+
+    const localCtrl = this.getLocalController();
+    const binding = localCtrl?.bindings.find((b) => b.type === btn.type);
+    if (binding) {
+      binding.activeTouchPointers.add(pointerId);
+      binding.isTouchDown = true;
+    }
+  }
+
+  private releaseTouchActionButton(btn: TouchActionButtonUI, pointerId: number): void {
+    if (!btn.activePointers.has(pointerId)) return;
+    btn.activePointers.delete(pointerId);
+
+    const stillPressed = btn.activePointers.size > 0;
+    btn.container.setScale(stillPressed ? 0.92 : 1);
+    this.drawTouchButtonCircle(btn.bgCircle, btn.radius, btn.color, stillPressed);
+
+    const localCtrl = this.getLocalController();
+    const binding = localCtrl?.bindings.find((b) => b.type === btn.type);
+    if (binding) {
+      binding.activeTouchPointers.delete(pointerId);
+      binding.isTouchDown = binding.activeTouchPointers.size > 0;
+    }
+  }
+
+  private releaseTouchActionPointer(pointerId: number): void {
+    for (const btn of this.touchActionButtons) {
+      this.releaseTouchActionButton(btn, pointerId);
+    }
+  }
+
+  private clearAllTouchActions(): void {
+    for (const btn of this.touchActionButtons) {
+      btn.activePointers.clear();
+      btn.container.setScale(1);
+      this.drawTouchButtonCircle(btn.bgCircle, btn.radius, btn.color, false);
+    }
+    const localCtrl = this.getLocalController();
+    if (localCtrl) {
+      for (const b of localCtrl.bindings) {
+        b.activeTouchPointers.clear();
+        b.isTouchDown = false;
+      }
+    }
   }
 
   private setupNetworkListeners(): void {
@@ -768,7 +1000,9 @@ export class MainScene extends Phaser.Scene {
           scene.updateTimerHud();
 
           scene.isPointerDown = false;
+          scene.stickPointerId = null;
           scene.stickGraphics.clear();
+          scene.clearAllTouchActions();
 
           for (const ctrl of scene.controllers) {
             ctrl.analogVector.set(0, 0);
@@ -1342,7 +1576,7 @@ export class MainScene extends Phaser.Scene {
     let currentlyHeld: MoveBinding | null = null;
 
     for (const binding of ctrl.bindings) {
-      const isDownNow = binding.keys.some((k) => k.isDown);
+      const isDownNow = binding.keys.some((k) => k.isDown) || binding.isTouchDown;
       if (isDownNow && !binding.wasDown) {
         newlyPressed = binding;
       }
@@ -1447,7 +1681,19 @@ export class MainScene extends Phaser.Scene {
 
   private renderVirtualStick(): void {
     this.stickGraphics.clear();
-    if (!this.isPointerDown) return;
+
+    if (!this.isPointerDown) {
+      // Base táctil de reposo translúcida en la esquina inferior izquierda
+      const defX = this.stickDefaultPos.x;
+      const defY = this.stickDefaultPos.y;
+      this.stickGraphics.fillStyle(0x0f172a, 0.28);
+      this.stickGraphics.fillCircle(defX, defY, this.stickMaxRadius);
+      this.stickGraphics.lineStyle(2, 0xffffff, 0.35);
+      this.stickGraphics.strokeCircle(defX, defY, this.stickMaxRadius);
+      this.stickGraphics.fillStyle(0xffffff, 0.22);
+      this.stickGraphics.fillCircle(defX, defY, 18);
+      return;
+    }
 
     const dx = this.stickCurrent.x - this.stickOrigin.x;
     const dy = this.stickCurrent.y - this.stickOrigin.y;
@@ -1457,17 +1703,17 @@ export class MainScene extends Phaser.Scene {
     const knobX = this.stickOrigin.x + Math.cos(angle) * dist;
     const knobY = this.stickOrigin.y + Math.sin(angle) * dist;
 
-    this.stickGraphics.fillStyle(0x000000, 0.25);
+    this.stickGraphics.fillStyle(0x0f172a, 0.45);
     this.stickGraphics.fillCircle(this.stickOrigin.x, this.stickOrigin.y, this.stickMaxRadius);
-    this.stickGraphics.lineStyle(2, 0xffffff, 0.5);
+    this.stickGraphics.lineStyle(2.5, 0xffffff, 0.7);
     this.stickGraphics.strokeCircle(this.stickOrigin.x, this.stickOrigin.y, this.stickMaxRadius);
 
-    this.stickGraphics.lineStyle(2, 0xfacc15, 0.7);
+    this.stickGraphics.lineStyle(2, 0xfacc15, 0.85);
     this.stickGraphics.lineBetween(this.stickOrigin.x, this.stickOrigin.y, knobX, knobY);
 
-    this.stickGraphics.fillStyle(0xfacc15, 0.85);
-    this.stickGraphics.fillCircle(knobX, knobY, 20);
-    this.stickGraphics.lineStyle(2, 0xffffff, 0.9);
-    this.stickGraphics.strokeCircle(knobX, knobY, 20);
+    this.stickGraphics.fillStyle(0xfacc15, 0.95);
+    this.stickGraphics.fillCircle(knobX, knobY, 22);
+    this.stickGraphics.lineStyle(2, 0xffffff, 0.95);
+    this.stickGraphics.strokeCircle(knobX, knobY, 22);
   }
 }

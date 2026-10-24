@@ -265,6 +265,23 @@ export class MenuScene extends Phaser.Scene {
       .setOrigin(0, 0.5);
 
     this.joinInputBox = this.add.graphics();
+    const codeHitZone = this.add
+      .zone(-35, 0, 160, 44)
+      .setInteractive({ useHandCursor: true });
+
+    codeHitZone.on('pointerup', () => {
+      if (!this.sys.game.device.os.desktop) {
+        const entered = window.prompt('Ingresa el código de la sala (5 caracteres):', this.joinCode);
+        if (entered !== null) {
+          this.joinCode = entered
+            .replace(/[^a-zA-Z0-9]/g, '')
+            .toUpperCase()
+            .slice(0, 6);
+          this.renderJoinBox();
+        }
+      }
+    });
+
     this.joinCodeText = this.add
       .text(-35, 0, '', {
         fontFamily: 'monospace',
@@ -293,7 +310,14 @@ export class MenuScene extends Phaser.Scene {
       this.handleJoinRoom();
     });
 
-    this.joinContainer.add([label, this.joinInputBox, this.joinCodeText, connectBtn, connectTxt]);
+    this.joinContainer.add([
+      label,
+      this.joinInputBox,
+      codeHitZone,
+      this.joinCodeText,
+      connectBtn,
+      connectTxt
+    ]);
     this.joinContainer.setVisible(false);
     this.renderJoinBox();
   }
