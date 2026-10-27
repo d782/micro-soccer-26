@@ -13,7 +13,8 @@ import {
   LobbyPlayerProfile,
   RemoteInputPayload,
   MatchSyncPayload,
-  AuthoritativePlayerSync
+  AuthoritativePlayerSync,
+  TackleSyncEvent
 } from '../network/PeerManager';
 
 export type MatchStateName = 'PLAYING' | 'GOAL_CELEBRATION' | 'FULL_TIME';
@@ -73,6 +74,11 @@ export class MainScene extends Phaser.Scene {
   public matchFsm!: StateMachine<MainScene, MatchStateName>;
   private readonly matchDurationMs = 3 * 60 * 1000;
   private remainingTimeMs = this.matchDurationMs;
+
+  private tackleEventSeq = 0;
+  private lastTackleSync: TackleSyncEvent | null = null;
+  private lastHandledTackleSeq = 0;
+  private celebrationTimer?: Phaser.Time.TimerEvent;
 
   private blueScore = 0;
   private redScore = 0;
@@ -776,6 +782,16 @@ export class MainScene extends Phaser.Scene {
       if (sync.matchState && currentState !== sync.matchState) {
         this.matchFsm.setState(sync.matchState);
       }
+      if (sync.matchState === 'PLAYING') {
+        this.tweens.killTweensOf(this.goalBannerText);
+        this.goalBannerText.setVisible(false);
+      }
+
+      // Sincronización del evento de placaje (Host -> Guest)
+      if (sync.lastTackle && sync.lastTackle.seq !== this.lastHandledTackleSeq) {
+        this.lastHandledTackleSeq = sync.lastTackle.seq;
+        this.handleRemoteTackleFeedback(sync.lastTackle);
+      }
     };
 
     peerManager.on('guest-input', onGuestInput);
@@ -991,6 +1007,10 @@ export class MainScene extends Phaser.Scene {
     this.matchFsm
       .addState('PLAYING', {
         name: 'PLAYING',
+        onEnter: (scene) => {
+          scene.tweens.killTweensOf(scene.goalBannerText);
+          scene.goalBannerText.setVisible(false);
+        },
         onUpdate: (scene, delta) => {
           scene.remainingTimeMs = Math.max(0, scene.remainingTimeMs - delta);
           scene.updateTimerHud();
@@ -1049,6 +1069,7 @@ export class MainScene extends Phaser.Scene {
           scene.goalBannerText.setColor(bannerColor);
           scene.goalBannerText.setVisible(true);
           scene.goalBannerText.setScale(0.5);
+          scene.tweens.killTweensOf(scene.goalBannerText);
           scene.tweens.add({
             targets: scene.goalBannerText,
             scale: 1.05,
@@ -1056,23 +1077,49 @@ export class MainScene extends Phaser.Scene {
             ease: 'Back.easeOut'
           });
 
-          scene.time.delayedCall(1500, () => {
-            if (!scene.matchFsm.isInState('GOAL_CELEBRATION')) return;
-            scene.goalBannerText.setVisible(false);
-            scene.ball.resetTo(scene.pitch.centerSpot.x, scene.pitch.centerSpot.y);
-
-            // Reposicionar a todos los jugadores en su formación táctica inicial
-            for (const ctrl of scene.controllers) {
-              ctrl.player.resetToPosition(ctrl.spawnX, ctrl.spawnY, ctrl.spawnAngle);
+          // Solo la autoridad (Host o modo local) gobierna el reinicio del balón y el regreso a PLAYING
+          if (!scene.isLocalGuest()) {
+            if (scene.celebrationTimer) {
+              scene.celebrationTimer.remove(false);
             }
+            scene.celebrationTimer = scene.time.delayedCall(1600, () => {
+              if (!scene.matchFsm.isInState('GOAL_CELEBRATION')) return;
+              scene.goalBannerText.setVisible(false);
+              scene.ball.resetTo(scene.pitch.centerSpot.x, scene.pitch.centerSpot.y);
 
-            scene.matchFsm.setState('PLAYING');
-          });
+              // Reposicionar a todos los jugadores en su formación táctica inicial
+              for (const ctrl of scene.controllers) {
+                ctrl.player.resetToPosition(ctrl.spawnX, ctrl.spawnY, ctrl.spawnAngle);
+              }
+
+              scene.matchFsm.setState('PLAYING');
+            });
+          } else {
+            // Salvaguarda en cliente por si hay latencia en el paquete de estado
+            scene.time.delayedCall(2200, () => {
+              scene.tweens.killTweensOf(scene.goalBannerText);
+              scene.goalBannerText.setVisible(false);
+            });
+          }
+        },
+        onExit: (scene) => {
+          scene.tweens.killTweensOf(scene.goalBannerText);
+          scene.goalBannerText.setVisible(false);
+          if (scene.celebrationTimer) {
+            scene.celebrationTimer.remove(false);
+            scene.celebrationTimer = undefined;
+          }
         }
       })
       .addState('FULL_TIME', {
         name: 'FULL_TIME',
         onEnter: (scene) => {
+          scene.tweens.killTweensOf(scene.goalBannerText);
+          scene.goalBannerText.setVisible(false);
+          if (scene.celebrationTimer) {
+            scene.celebrationTimer.remove(false);
+            scene.celebrationTimer = undefined;
+          }
           scene.remainingTimeMs = 0;
           scene.updateTimerHud();
 
@@ -1220,9 +1267,11 @@ export class MainScene extends Phaser.Scene {
   }
 
   private handlePhysicalBounce(targetPlayer: Player): void {
-    // Caso 1: El otro jugador llevaba el balón -> Intercepción estilo HaxBall (pierde el balón y rueda según la dirección)
+    if (this.isLocalGuest()) return;
+
+    // Caso 1: El otro jugador llevaba el balón -> Mecánica de Placaje / Carga física (Defensa vs Ataque)
     if (this.ball.owner !== null && this.ball.owner !== targetPlayer) {
-      this.executeHaxballCarrierInterception(targetPlayer, this.ball.owner);
+      this.resolveTackleInteraction(targetPlayer, this.ball.owner);
       return;
     }
 
@@ -1231,49 +1280,148 @@ export class MainScene extends Phaser.Scene {
   }
 
   /**
-   * Intercepción estilo HaxBall cuando un jugador colisiona con quien lleva el balón:
-   * el portador pierde la posesión y el balón rueda libremente según la dirección del impacto.
+   * Mecánica de Placajes / Cargas físicas basada en los atributos RPG:
+   * 1. Detección: El jugador sin balón (tackler) colisiona contra el portador (carrier).
+   * 2. Influencia RPG: Defensa del embestidor vs Ataque del portador.
+   * 3. Éxito: El defensor roba el balón (desacople hacia adelante) y aplica knockback + stun al atacante.
+   * 4. Fallido: El atacante resiste con el balón y el defensor rebota hacia atrás con desequilibrio.
+   * 5. Cooldown: Protección anti-spam mediante temporizador de enfriamiento e inmunidad.
    */
-  private executeHaxballCarrierInterception(tackler: Player, carrier: Player): void {
-    const impactDx = this.ball.x - tackler.x;
-    const impactDy = this.ball.y - tackler.y;
-    const dist = Math.hypot(impactDx, impactDy) || 1;
-    const nx = impactDx / dist;
-    const ny = impactDy / dist;
+  private resolveTackleInteraction(tackler: Player, carrier: Player): void {
+    if (!tackler.canTackle() || carrier.isTackleImmune()) {
+      return;
+    }
 
-    // En estilo HaxBall, la dirección de rodado combina la normal del choque y el vector de empuje del interceptor
-    const tacklerVx = tackler.body.velocity.x;
-    const tacklerVy = tackler.body.velocity.y;
-    const carrierVx = carrier.body.velocity.x;
-    const carrierVy = carrier.body.velocity.y;
+    tackler.triggerTackleCooldown(1100);
+    carrier.triggerTackleImmunity(350);
 
-    const dirX = nx * 180 + tacklerVx * 0.85 - carrierVx * 0.25;
-    const dirY = ny * 180 + tacklerVy * 0.85 - carrierVy * 0.25;
-    const rollAngle = Math.atan2(dirY, dirX);
+    const impactAngle = Math.atan2(carrier.y - tackler.y, carrier.x - tackler.x);
+    const dirX = Math.cos(impactAngle);
+    const dirY = Math.sin(impactAngle);
 
-    const baseRollSpeed = Math.max(210, Math.min(440, Math.hypot(dirX, dirY)));
-    const rollSpeed = baseRollSpeed * Phaser.Math.Linear(1, tackler.getDefenseImpactMultiplier(), 0.5);
+    const statDef = tackler.stats.defense; // 10..50
+    const statAtk = carrier.stats.attack;  // 10..50
+    const diff = statDef - statAtk;        // -40..+40
 
-    const rollVx = Math.cos(rollAngle) * rollSpeed;
-    const rollVy = Math.sin(rollAngle) * rollSpeed;
+    // Probabilidad base 50% con influencia proporcional de Defensa vs Ataque (15%..85%)
+    const successProb = Phaser.Math.Clamp(0.50 + diff * 0.02, 0.15, 0.85);
+    const roll = Math.random();
+    const isSuccess = roll <= successProb;
 
-    // Despegar el balón fuera de los cuerpos para que ruede limpio sin quedar atrapado entre ambos
-    const midX = (tackler.x + carrier.x) * 0.5;
-    const midY = (tackler.y + carrier.y) * 0.5;
-    const spawnX = Phaser.Math.Clamp(
-      midX + Math.cos(rollAngle) * 28,
-      this.pitch.bounds.left + 12,
-      this.pitch.bounds.right - 12
-    );
-    const spawnY = Phaser.Math.Clamp(
-      midY + Math.sin(rollAngle) * 28,
-      this.pitch.bounds.top + 12,
-      this.pitch.bounds.bottom - 12
-    );
+    // Registrar evento autoritativo para sincronización WebRTC
+    const tacklerPeerId = this.findPeerIdByPlayer(tackler);
+    const carrierPeerId = this.findPeerIdByPlayer(carrier);
 
-    this.ball.setPosition(spawnX, spawnY);
-    this.ball.body.reset(spawnX, spawnY);
-    this.ball.triggerHaxballInterception(rollVx, rollVy, 0, 340);
+    this.lastTackleSync = {
+      seq: ++this.tackleEventSeq,
+      tacklerPeerId,
+      carrierPeerId,
+      isSuccess,
+      x: carrier.x,
+      y: carrier.y
+    };
+
+    if (isSuccess) {
+      // === CASO ÉXITO (Defensa gana o empata) ===
+      const defNorm = (statDef - 10) / 40;
+      const rollSpeed = Phaser.Math.Linear(260, 440, defNorm);
+      const rollVx = dirX * rollSpeed + (Math.random() - 0.5) * 50;
+      const rollVy = dirY * rollSpeed + (Math.random() - 0.5) * 50;
+
+      const spawnX = Phaser.Math.Clamp(
+        carrier.x + dirX * 26,
+        this.pitch.bounds.left + 12,
+        this.pitch.bounds.right - 12
+      );
+      const spawnY = Phaser.Math.Clamp(
+        carrier.y + dirY * 26,
+        this.pitch.bounds.top + 12,
+        this.pitch.bounds.bottom - 12
+      );
+
+      this.ball.setPosition(spawnX, spawnY);
+      this.ball.body.reset(spawnX, spawnY);
+      this.ball.triggerHaxballInterception(rollVx, rollVy, 0, 350);
+
+      const knockback = Phaser.Math.Linear(180, 320, defNorm);
+      carrier.body.velocity.x += dirX * knockback;
+      carrier.body.velocity.y += dirY * knockback;
+      carrier.applyStun(380, 0xef4444);
+
+      this.cameras.main.shake(80, 0.005);
+      this.showFloatingCombatText(carrier.x, carrier.y - 32, '¡PLACAJE!', '#ef4444');
+      if (this.cache.audio.exists('ui_click')) {
+        this.sound.play('ui_click', { volume: 0.65 });
+      }
+    } else {
+      // === CASO FALLIDO (Ataque gana / resiste la carga) ===
+      const atkNorm = (statAtk - 10) / 40;
+      const recoil = Phaser.Math.Linear(160, 280, atkNorm);
+      tackler.body.velocity.x -= dirX * recoil;
+      tackler.body.velocity.y -= dirY * recoil;
+      tackler.applyStun(220, 0xfacc15);
+
+      this.showFloatingCombatText(carrier.x, carrier.y - 32, '¡RESISTIDO!', '#4ade80');
+      if (this.cache.audio.exists('ui_tap')) {
+        this.sound.play('ui_tap', { volume: 0.5 });
+      }
+    }
+  }
+
+  private showFloatingCombatText(x: number, y: number, text: string, color: string): void {
+    const label = this.add
+      .text(x, y, text, {
+        fontFamily: 'KenneyFuture, sans-serif',
+        fontSize: '13px',
+        fontStyle: 'bold',
+        color,
+        stroke: '#0f172a',
+        strokeThickness: 3
+      })
+      .setOrigin(0.5)
+      .setDepth(150);
+
+    this.tweens.add({
+      targets: label,
+      y: y - 26,
+      alpha: 0,
+      duration: 600,
+      ease: 'Power2',
+      onComplete: () => {
+        label.destroy();
+      }
+    });
+  }
+
+  private findPeerIdByPlayer(player: Player): string {
+    for (const ctrl of this.controllers) {
+      if (ctrl.player === player) return ctrl.peerId;
+    }
+    return '';
+  }
+
+  private handleRemoteTackleFeedback(tackle: TackleSyncEvent): void {
+    const tacklerCtrl = this.controllersByPeerId.get(tackle.tacklerPeerId);
+    const carrierCtrl = this.controllersByPeerId.get(tackle.carrierPeerId);
+
+    if (tackle.isSuccess) {
+      if (carrierCtrl) {
+        carrierCtrl.player.applyStun(380, 0xef4444);
+      }
+      this.cameras.main.shake(80, 0.005);
+      this.showFloatingCombatText(tackle.x, tackle.y - 32, '¡PLACAJE!', '#ef4444');
+      if (this.cache.audio.exists('ui_click')) {
+        this.sound.play('ui_click', { volume: 0.65 });
+      }
+    } else {
+      if (tacklerCtrl) {
+        tacklerCtrl.player.applyStun(220, 0xfacc15);
+      }
+      this.showFloatingCombatText(tackle.x, tackle.y - 32, '¡RESISTIDO!', '#4ade80');
+      if (this.cache.audio.exists('ui_tap')) {
+        this.sound.play('ui_tap', { volume: 0.5 });
+      }
+    }
   }
 
   /**
@@ -1375,6 +1523,8 @@ export class MainScene extends Phaser.Scene {
    * Si quien lleva el balón supera ampliamente en Defensa/Técnica al rival, aguanta la embestida; de lo contrario, pierde el balón al estilo HaxBall.
    */
   private handlePlayersBodyClash(pA: Player, pB: Player): void {
+    if (this.isLocalGuest()) return;
+
     const angleAToB = Math.atan2(pB.y - pA.y, pB.x - pA.x);
     const nx = Math.cos(angleAToB);
     const ny = Math.sin(angleAToB);
@@ -1399,19 +1549,7 @@ export class MainScene extends Phaser.Scene {
       const carrier = this.ball.owner;
       const tackler = carrier === pA ? pB : pA;
 
-      const carrierPoise = carrier.stats.defense + carrier.stats.technique * 0.35;
-      const tacklerMomentum = (tackler.body.velocity.length() / 240) * 10;
-      const tacklerPower = tackler.stats.defense + tacklerMomentum;
-
-      // Si el portador es un muro físico y supera por >=18 pts la Defensa del rival, aguanta la carga sin perder el balón
-      if (
-        carrier.stats.defense - tackler.stats.defense >= 18 &&
-        carrierPoise > tacklerPower
-      ) {
-        return;
-      }
-
-      this.executeHaxballCarrierInterception(tackler, carrier);
+      this.resolveTackleInteraction(tackler, carrier);
     }
   }
 
@@ -1477,27 +1615,43 @@ export class MainScene extends Phaser.Scene {
     if (!localCtrl) return;
 
     if (!this.matchFsm.isInState('FULL_TIME')) {
-      this.computeControllerInput(localCtrl, delta, true);
-      this.pollControllerMoveRequest(localCtrl, delta);
+      if (localCtrl.player.isStunned()) {
+        localCtrl.analogVector.set(0, 0);
+        localCtrl.activeMoveRequest = null;
+        peerManager.sendGuestInput({
+          peerId: localCtrl.peerId,
+          up: false,
+          down: false,
+          left: false,
+          right: false,
+          vx: 0,
+          vy: 0,
+          moveRequest: null,
+          seq: ++this.inputSeq
+        });
+      } else {
+        this.computeControllerInput(localCtrl, delta, true);
+        this.pollControllerMoveRequest(localCtrl, delta);
 
-      const isUp = Boolean(localCtrl.moveKeys?.up.some((k) => k.isDown));
-      const isDown = Boolean(localCtrl.moveKeys?.down.some((k) => k.isDown));
-      const isLeft = Boolean(localCtrl.moveKeys?.left.some((k) => k.isDown));
-      const isRight = Boolean(localCtrl.moveKeys?.right.some((k) => k.isDown));
+        const isUp = Boolean(localCtrl.moveKeys?.up.some((k) => k.isDown));
+        const isDown = Boolean(localCtrl.moveKeys?.down.some((k) => k.isDown));
+        const isLeft = Boolean(localCtrl.moveKeys?.left.some((k) => k.isDown));
+        const isRight = Boolean(localCtrl.moveKeys?.right.some((k) => k.isDown));
 
-      peerManager.sendGuestInput({
-        peerId: localCtrl.peerId,
-        up: isUp,
-        down: isDown,
-        left: isLeft,
-        right: isRight,
-        vx: localCtrl.analogVector.x,
-        vy: localCtrl.analogVector.y,
-        moveRequest: localCtrl.activeMoveRequest
-          ? { ...localCtrl.activeMoveRequest }
-          : null,
-        seq: ++this.inputSeq
-      });
+        peerManager.sendGuestInput({
+          peerId: localCtrl.peerId,
+          up: isUp,
+          down: isDown,
+          left: isLeft,
+          right: isRight,
+          vx: localCtrl.analogVector.x,
+          vy: localCtrl.analogVector.y,
+          moveRequest: localCtrl.activeMoveRequest
+            ? { ...localCtrl.activeMoveRequest }
+            : null,
+          seq: ++this.inputSeq
+        });
+      }
     } else {
       localCtrl.analogVector.set(0, 0);
       localCtrl.activeMoveRequest = null;
@@ -1587,7 +1741,9 @@ export class MainScene extends Phaser.Scene {
           angle: p.getFacingAngle(),
           state: p.fsm.getStateName() ?? 'IDLE',
           powerRatio: pPower.ratio,
-          powerLabel: pPower.label
+          powerLabel: pPower.label,
+          isStunned: p.isStunned(),
+          stunColor: p.getStunColor()
         };
         if (this.ball.owner === p) {
           ownerPeerId = ctrl.peerId;
@@ -1611,7 +1767,8 @@ export class MainScene extends Phaser.Scene {
         redScore: this.redScore,
         remainingTimeMs: this.remainingTimeMs,
         matchState: (this.matchFsm.getStateName() ?? 'PLAYING') as MatchStateName,
-        lastGoalTeam: this.lastGoalScoringTeam
+        lastGoalTeam: this.lastGoalScoringTeam,
+        lastTackle: this.lastTackleSync
       });
     }
   }

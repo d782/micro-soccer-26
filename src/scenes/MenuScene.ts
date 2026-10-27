@@ -159,10 +159,16 @@ export class MenuScene extends Phaser.Scene {
       })
       .setOrigin(0.5);
 
-    // Captura de teclado para escribir el código de sala
+    // Captura de teclado para escribir y pegar el código de sala
     if (this.input.keyboard) {
       this.input.keyboard.on('keydown', (event: KeyboardEvent) => {
         if (this.isTransitioning || !this.isJoinMode) return;
+
+        // Soporte de pegado rápido por atajo de teclado (Ctrl+V / Cmd+V)
+        if ((event.ctrlKey || event.metaKey) && (event.key === 'v' || event.key === 'V')) {
+          this.pasteCodeFromClipboard();
+          return;
+        }
 
         if (event.key === 'Backspace') {
           this.joinCode = this.joinCode.slice(0, -1);
@@ -187,6 +193,21 @@ export class MenuScene extends Phaser.Scene {
         }
       });
     }
+
+    // Soporte para evento de pegado nativo del navegador (ej. clic derecho -> Pegar o Ctrl+V)
+    const onWindowPaste = (event: ClipboardEvent) => {
+      if (this.isTransitioning || !this.isJoinMode) return;
+      const text = event.clipboardData?.getData('text');
+      if (text) {
+        event.preventDefault();
+        this.applyPastedCode(text);
+      }
+    };
+    window.addEventListener('paste', onWindowPaste);
+
+    this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
+      window.removeEventListener('paste', onWindowPaste);
+    });
 
     this.time.addEvent({
       delay: 480,
@@ -271,13 +292,9 @@ export class MenuScene extends Phaser.Scene {
 
     codeHitZone.on('pointerup', () => {
       if (!this.sys.game.device.os.desktop) {
-        const entered = window.prompt('Ingresa el código de la sala (5 caracteres):', this.joinCode);
+        const entered = window.prompt('Ingresa o pega el código de la sala (Ctrl+V):', this.joinCode);
         if (entered !== null) {
-          this.joinCode = entered
-            .replace(/[^a-zA-Z0-9]/g, '')
-            .toUpperCase()
-            .slice(0, 6);
-          this.renderJoinBox();
+          this.applyPastedCode(entered);
         }
       }
     });
@@ -291,6 +308,7 @@ export class MenuScene extends Phaser.Scene {
       })
       .setOrigin(0.5);
 
+    // Botón CONECTAR
     const connectBtn = this.add
       .nineslice(165, 0, 'ui_btn_green_up', undefined, 160, 44, 14, 14, 14, 14)
       .setInteractive({ useHandCursor: true });
@@ -306,7 +324,20 @@ export class MenuScene extends Phaser.Scene {
       })
       .setOrigin(0.5);
 
+    connectBtn.on('pointerover', () => {
+      connectBtn.setTint(0xdcfce7);
+    });
+
+    connectBtn.on('pointerout', () => {
+      connectBtn.clearTint();
+    });
+
+    connectBtn.on('pointerdown', () => {
+      connectBtn.setAlpha(0.7);
+    });
+
     connectBtn.on('pointerup', () => {
+      connectBtn.setAlpha(1);
       this.handleJoinRoom();
     });
 
@@ -322,11 +353,48 @@ export class MenuScene extends Phaser.Scene {
     this.renderJoinBox();
   }
 
+  private async pasteCodeFromClipboard(): Promise<void> {
+    try {
+      if (navigator.clipboard && navigator.clipboard.readText) {
+        const text = await navigator.clipboard.readText();
+        if (text && text.trim().length > 0) {
+          this.applyPastedCode(text);
+          return;
+        }
+      }
+    } catch (err) {
+      console.warn('Lectura de portapapeles bloqueada por el navegador, solicitando vía prompt:', err);
+    }
+
+    const entered = window.prompt('Pega aquí el código de la sala (Ctrl+V):', this.joinCode);
+    if (entered !== null) {
+      this.applyPastedCode(entered);
+    }
+  }
+
+  private applyPastedCode(rawText: string): void {
+    if (!rawText) return;
+    const clean = rawText
+      .replace(/[^a-zA-Z0-9]/g, '')
+      .toUpperCase()
+      .slice(0, 6);
+
+    if (clean.length > 0) {
+      this.joinCode = clean;
+      if (this.cache.audio.exists('ui_tap')) {
+        this.sound.play('ui_tap', { volume: 0.5 });
+      }
+      this.renderJoinBox();
+      this.statusText.setText(`Código "${clean}" pegado. Presiona CONECTAR`);
+      this.statusText.setColor('#4ade80');
+    }
+  }
+
   private toggleJoinInput(show: boolean): void {
     this.isJoinMode = show;
     this.joinContainer.setVisible(show);
     if (show) {
-      this.statusText.setText('Escribe el código de 5 caracteres del Host y presiona CONECTAR');
+      this.statusText.setText('Escribe o pega (Ctrl+V) el código de 5 caracteres del Host');
       this.statusText.setColor('#fef08a');
       this.renderJoinBox();
     }

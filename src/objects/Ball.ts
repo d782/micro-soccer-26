@@ -209,6 +209,7 @@ export class Ball extends Phaser.GameObjects.Container {
   }
 
   public canBeCapturedBy(player: Player): boolean {
+    if (player.isStunned()) return false;
     if (this.z > 26) return false;
     if (this.interceptFreeRollTimer > 0) return false;
     if (this.owner !== null && this.owner !== player) return false;

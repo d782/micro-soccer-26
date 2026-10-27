@@ -12,15 +12,17 @@ interface StatRowConfig {
 interface StatRowUI {
   config: StatRowConfig;
   valueText: Phaser.GameObjects.Text;
-  barGraphics: Phaser.GameObjects.Graphics;
-  barX: number;
-  barY: number;
-  barWidth: number;
-  barHeight: number;
-  minus5Btn: Phaser.GameObjects.Image;
-  minus1Btn: Phaser.GameObjects.Image;
-  plus1Btn: Phaser.GameObjects.Image;
-  plus5Btn: Phaser.GameObjects.Image;
+  valueBadge: Phaser.GameObjects.Graphics;
+  trackGraphics: Phaser.GameObjects.Graphics;
+  fillGraphics: Phaser.GameObjects.Graphics;
+  knobContainer: Phaser.GameObjects.Container;
+  knobGlow: Phaser.GameObjects.Graphics;
+  knobBall: Phaser.GameObjects.Image;
+  trackX: number;
+  trackY: number;
+  trackWidth: number;
+  trackHeight: number;
+  hitZone: Phaser.GameObjects.Zone;
 }
 
 export class SkillScene extends Phaser.Scene {
@@ -53,6 +55,8 @@ export class SkillScene extends Phaser.Scene {
   private startBtnIcon!: Phaser.GameObjects.Image;
   private startBtnLabel!: Phaser.GameObjects.Text;
   private isTransitioning = false;
+  private activeDragRow: StatRowUI | null = null;
+  private lastTapSoundTime = 0;
 
   private readonly statConfigs: StatRowConfig[] = [
     {
@@ -168,12 +172,12 @@ export class SkillScene extends Phaser.Scene {
       this.createStatRow(cfg, rowY);
     });
 
-    // Nota informativa de límites
+    // Nota informativa de límites e interacción
     this.add
       .text(
         panelX,
         536,
-        'Límites por atributo: mínimo 10  •  máximo 50  •  Asigna todos los puntos y presiona ¡LISTO! para ir a la Sala de Espera',
+        'Arrastra las barras con el mouse para asignar atributos (mínimo 10 • máximo 50) • Asigna todos los puntos para continuar',
         {
           fontFamily: 'sans-serif',
           fontSize: '14px',
@@ -250,6 +254,28 @@ export class SkillScene extends Phaser.Scene {
       if (this.getRemainingPoints() === 0) {
         this.confirmProfileAndGoToLobby();
       }
+    });
+
+    // Control global de arrastre con el mouse sobre cualquier barra de skill
+    this.input.on('pointermove', (pointer: Phaser.Input.Pointer) => {
+      if (this.isTransitioning || !this.activeDragRow) return;
+      this.updateStatFromPointerX(this.activeDragRow, pointer.x);
+    });
+
+    const stopDragging = () => {
+      if (this.activeDragRow) {
+        this.activeDragRow.knobContainer.setScale(1.0);
+        this.activeDragRow.knobGlow.setAlpha(0.35);
+        this.activeDragRow = null;
+      }
+    };
+
+    this.input.on('pointerup', stopDragging);
+    this.input.on('pointerupoutside', stopDragging);
+    this.input.on('gameout', stopDragging);
+
+    this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
+      this.activeDragRow = null;
     });
 
     this.refreshUI();
@@ -436,13 +462,15 @@ export class SkillScene extends Phaser.Scene {
     const rowWidth = 930;
 
     const rowBg = this.add.graphics();
-    rowBg.fillStyle(0x0f172a, 0.42);
+    rowBg.fillStyle(0x0f172a, 0.45);
     rowBg.fillRoundedRect(leftX, y - 26, rowWidth, 52, 12);
+    rowBg.lineStyle(1.5, 0x1e293b, 0.6);
+    rowBg.strokeRoundedRect(leftX, y - 26, rowWidth, 52, 12);
 
     this.add
       .text(leftX + 20, y - 9, cfg.label, {
         fontFamily: 'sans-serif',
-        fontSize: '17px',
+        fontSize: '16px',
         fontStyle: 'bold',
         color: '#ffffff',
         stroke: '#0f172a',
@@ -451,89 +479,131 @@ export class SkillScene extends Phaser.Scene {
       .setOrigin(0, 0.5);
 
     this.add
-      .text(leftX + 20, y + 12, cfg.description, {
+      .text(leftX + 20, y + 11, cfg.description, {
         fontFamily: 'sans-serif',
-        fontSize: '13px',
-        color: '#cbd5e1'
+        fontSize: '12px',
+        color: '#94a3b8'
       })
       .setOrigin(0, 0.5);
 
-    const barX = 495;
-    const barY = y - 10;
-    const barWidth = 265;
-    const barHeight = 20;
-    const barGraphics = this.add.graphics();
+    const trackX = 475;
+    const trackY = y - 9;
+    const trackWidth = 495;
+    const trackHeight = 18;
+
+    const trackGraphics = this.add.graphics();
+    const fillGraphics = this.add.graphics();
+
+    // Placa numérica de valor a la derecha
+    const badgeX = 1032;
+    const badgeW = 76;
+    const badgeH = 38;
+
+    const valueBadge = this.add.graphics();
+    valueBadge.fillStyle(0x090f1d, 0.85);
+    valueBadge.fillRoundedRect(badgeX - badgeW / 2, y - badgeH / 2, badgeW, badgeH, 8);
+    valueBadge.lineStyle(1.5, cfg.color, 0.75);
+    valueBadge.strokeRoundedRect(badgeX - badgeW / 2, y - badgeH / 2, badgeW, badgeH, 8);
 
     const valueText = this.add
-      .text(barX + barWidth + 48, y, '25', {
+      .text(badgeX, y, '25', {
         fontFamily: 'sans-serif',
-        fontSize: '21px',
+        fontSize: '19px',
         fontStyle: 'bold',
         color: '#fef08a',
         stroke: '#0f172a',
-        strokeThickness: 4
-      })
-      .setOrigin(0.5);
-
-    const btnBaseX = 885;
-    const btnStep = 56;
-    const minus5Btn = this.createAdjustButton(btnBaseX, y, '-5', 'ui_sq_red', () => {
-      this.modifyStat(cfg.key, -5);
-    });
-    const minus1Btn = this.createAdjustButton(btnBaseX + btnStep, y, '-1', 'ui_sq_red', () => {
-      this.modifyStat(cfg.key, -1);
-    });
-    const plus1Btn = this.createAdjustButton(btnBaseX + btnStep * 2, y, '+1', 'ui_sq_green', () => {
-      this.modifyStat(cfg.key, 1);
-    });
-    const plus5Btn = this.createAdjustButton(btnBaseX + btnStep * 3, y, '+5', 'ui_sq_green', () => {
-      this.modifyStat(cfg.key, 5);
-    });
-
-    this.rows.push({
-      config: cfg,
-      valueText,
-      barGraphics,
-      barX,
-      barY,
-      barWidth,
-      barHeight,
-      minus5Btn,
-      minus1Btn,
-      plus1Btn,
-      plus5Btn
-    });
-  }
-
-  private createAdjustButton(
-    x: number,
-    y: number,
-    text: string,
-    texture: string,
-    onClick: () => void
-  ): Phaser.GameObjects.Image {
-    const btn = this.add
-      .image(x, y, texture)
-      .setDisplaySize(46, 40)
-      .setInteractive({ useHandCursor: true });
-
-    this.add
-      .text(x, y - 1, text, {
-        fontFamily: 'sans-serif',
-        fontSize: '15px',
-        fontStyle: 'bold',
-        color: '#ffffff',
-        stroke: '#0f172a',
         strokeThickness: 3
       })
       .setOrigin(0.5);
 
-    btn.on('pointerdown', () => {
+    // Tirador (Knob) deslizable con icono de balón de fútbol
+    const knobContainer = this.add.container(trackX, y);
+
+    const knobGlow = this.add.graphics();
+    knobGlow.fillStyle(cfg.color, 0.35);
+    knobGlow.fillCircle(0, 0, 18);
+    knobGlow.lineStyle(2, cfg.color, 0.85);
+    knobGlow.strokeCircle(0, 0, 18);
+
+    const knobBg = this.add.graphics();
+    knobBg.fillStyle(0xffffff, 0.95);
+    knobBg.fillCircle(0, 0, 14);
+    knobBg.lineStyle(1.5, 0x0f172a, 0.75);
+    knobBg.strokeCircle(0, 0, 14);
+
+    const knobBall = this.add.image(0, 0, 'ball').setDisplaySize(24, 24);
+
+    knobContainer.add([knobGlow, knobBg, knobBall]);
+
+    // Zona interactiva amplia para hacer clic o arrastrar con el mouse
+    const hitZone = this.add
+      .zone(trackX + trackWidth / 2, y, trackWidth + 28, 48)
+      .setInteractive({ useHandCursor: true });
+
+    const rowUI: StatRowUI = {
+      config: cfg,
+      valueText,
+      valueBadge,
+      trackGraphics,
+      fillGraphics,
+      knobContainer,
+      knobGlow,
+      knobBall,
+      trackX,
+      trackY,
+      trackWidth,
+      trackHeight,
+      hitZone
+    };
+
+    hitZone.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
       if (this.isTransitioning) return;
-      onClick();
+      this.activeDragRow = rowUI;
+      this.updateStatFromPointerX(rowUI, pointer.x);
+      knobContainer.setScale(1.2);
+      knobGlow.setAlpha(0.9);
     });
 
-    return btn;
+    hitZone.on('pointerover', () => {
+      if (this.isTransitioning || this.activeDragRow) return;
+      knobContainer.setScale(1.1);
+      knobGlow.setAlpha(0.7);
+    });
+
+    hitZone.on('pointerout', () => {
+      if (this.activeDragRow !== rowUI) {
+        knobContainer.setScale(1.0);
+        knobGlow.setAlpha(0.35);
+      }
+    });
+
+    hitZone.on('wheel', (_pointer: Phaser.Input.Pointer, _deltaX: number, deltaY: number) => {
+      if (this.isTransitioning) return;
+      const delta = deltaY > 0 ? -1 : 1;
+      this.modifyStat(cfg.key, delta);
+    });
+
+    this.rows.push(rowUI);
+  }
+
+  private updateStatFromPointerX(row: StatRowUI, pointerX: number): void {
+    const sumOther = this.getUsedPoints() - this.stats[row.config.key];
+    const maxPossible = Math.min(this.maxStat, this.totalBudget - sumOther);
+    const minPossible = this.minStat;
+
+    const ratio = Phaser.Math.Clamp((pointerX - row.trackX) / row.trackWidth, 0, 1);
+    const rawVal = Math.round(this.minStat + ratio * (this.maxStat - this.minStat));
+    const newVal = Phaser.Math.Clamp(rawVal, minPossible, maxPossible);
+
+    if (newVal !== this.stats[row.config.key]) {
+      this.stats[row.config.key] = newVal;
+      const now = this.time.now;
+      if (now - this.lastTapSoundTime > 50 && this.cache.audio.exists('ui_tap')) {
+        this.sound.play('ui_tap', { volume: 0.35 });
+        this.lastTapSoundTime = now;
+      }
+      this.refreshUI();
+    }
   }
 
   private createPresetButton(x: number, y: number, label: string, onClick: () => void): void {
@@ -589,7 +659,7 @@ export class SkillScene extends Phaser.Scene {
 
     this.stats[key] = current + actualDelta;
     if (this.cache.audio.exists('ui_tap')) {
-      this.sound.play('ui_tap', { volume: 0.45 });
+      this.sound.play('ui_tap', { volume: 0.35 });
     }
     this.refreshUI();
   }
@@ -611,23 +681,62 @@ export class SkillScene extends Phaser.Scene {
       row.valueText.setText(String(val));
 
       const ratio = (val - this.minStat) / (this.maxStat - this.minStat);
-      row.barGraphics.clear();
-      row.barGraphics.fillStyle(0x0f172a, 0.88);
-      row.barGraphics.fillRoundedRect(row.barX, row.barY, row.barWidth, row.barHeight, 6);
+      const fillW = Math.max(0, row.trackWidth * ratio);
 
-      const fillW = Math.max(8, row.barWidth * ratio);
-      row.barGraphics.fillStyle(row.config.color, 1);
-      row.barGraphics.fillRoundedRect(row.barX, row.barY, fillW, row.barHeight, 6);
+      // Track de fondo y muescas / marcas
+      row.trackGraphics.clear();
+      row.trackGraphics.fillStyle(0x0a1120, 0.95);
+      row.trackGraphics.fillRoundedRect(
+        row.trackX,
+        row.trackY,
+        row.trackWidth,
+        row.trackHeight,
+        row.trackHeight / 2
+      );
+      row.trackGraphics.lineStyle(1.5, 0x334155, 0.85);
+      row.trackGraphics.strokeRoundedRect(
+        row.trackX,
+        row.trackY,
+        row.trackWidth,
+        row.trackHeight,
+        row.trackHeight / 2
+      );
 
-      row.barGraphics.lineStyle(1.5, 0xffffff, 0.4);
-      row.barGraphics.strokeRoundedRect(row.barX, row.barY, row.barWidth, row.barHeight, 6);
+      // Muescas de referencia en 20, 30 y 40
+      row.trackGraphics.lineStyle(1, 0x475569, 0.65);
+      for (let tickStat = 20; tickStat <= 40; tickStat += 10) {
+        const tickRatio = (tickStat - this.minStat) / (this.maxStat - this.minStat);
+        const tickX = row.trackX + tickRatio * row.trackWidth;
+        row.trackGraphics.lineBetween(tickX, row.trackY + 3, tickX, row.trackY + row.trackHeight - 3);
+      }
 
-      const canSub = val > this.minStat;
-      const canAdd = val < this.maxStat && remaining > 0;
-      row.minus1Btn.setAlpha(canSub ? 1 : 0.35);
-      row.minus5Btn.setAlpha(canSub ? 1 : 0.35);
-      row.plus1Btn.setAlpha(canAdd ? 1 : 0.35);
-      row.plus5Btn.setAlpha(canAdd ? 1 : 0.35);
+      // Relleno de la barra según el valor
+      row.fillGraphics.clear();
+      if (fillW > 0) {
+        row.fillGraphics.fillStyle(row.config.color, 0.95);
+        row.fillGraphics.fillRoundedRect(
+          row.trackX,
+          row.trackY,
+          Math.max(row.trackHeight, fillW),
+          row.trackHeight,
+          row.trackHeight / 2
+        );
+
+        // Brillo superior sutil
+        row.fillGraphics.fillStyle(0xffffff, 0.28);
+        row.fillGraphics.fillRoundedRect(
+          row.trackX + 2,
+          row.trackY + 2,
+          Math.max(0, Math.max(row.trackHeight, fillW) - 4),
+          row.trackHeight / 2 - 2,
+          3
+        );
+      }
+
+      // Posición del knob y rotación de la pelota al desplazarse
+      const knobX = row.trackX + fillW;
+      row.knobContainer.setPosition(knobX, row.trackY + row.trackHeight / 2);
+      row.knobBall.setRotation(ratio * Math.PI * 4);
     }
 
     if (remaining === 0) {

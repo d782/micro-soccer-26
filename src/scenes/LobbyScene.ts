@@ -14,6 +14,10 @@ export class LobbyScene extends Phaser.Scene {
   private startButtonContainer!: Phaser.GameObjects.Container;
   private startBtnBg!: Phaser.GameObjects.NineSlice;
   private startBtnLabel!: Phaser.GameObjects.Text;
+  private roomCodeText!: Phaser.GameObjects.Text;
+  private copyBtnBg!: Phaser.GameObjects.NineSlice;
+  private copyBtnText!: Phaser.GameObjects.Text;
+  private copyFeedbackTimer?: Phaser.Time.TimerEvent;
 
   constructor() {
     super('LobbyScene');
@@ -56,7 +60,7 @@ export class LobbyScene extends Phaser.Scene {
       .nineslice(panelX, panelY, 'ui_panel_blue', undefined, panelW, panelH, 28, 28, 28, 28)
       .setAlpha(0.98);
 
-    // 3. Cabecera y Código de Sala destacado
+    // 3. Cabecera y Código de Sala destacado con opción de copiar
     this.add
       .text(panelX, 88, 'SALA DE ESPERA (LOBBY P2P)', {
         fontFamily: 'KenneyFuture, sans-serif',
@@ -68,19 +72,7 @@ export class LobbyScene extends Phaser.Scene {
       })
       .setOrigin(0.5);
 
-    const codeDisplay = peerManager.roomCode || 'LOCAL';
-    this.add
-      .nineslice(panelX, 142, 'ui_panel_grey', undefined, 380, 46, 16, 16, 16, 16)
-      .setOrigin(0.5);
-
-    this.add
-      .text(panelX, 142, `CÓDIGO DE SALA:  ${codeDisplay}`, {
-        fontFamily: 'sans-serif',
-        fontSize: '19px',
-        fontStyle: 'bold',
-        color: '#0f172a'
-      })
-      .setOrigin(0.5);
+    this.createRoomCodeSection(panelX, 142);
 
     // 4. Contenedor dinámico de tarjetas de jugadores conectados
     this.playersContainer = this.add.container(0, 0);
@@ -150,12 +142,34 @@ export class LobbyScene extends Phaser.Scene {
       this.launchMatchWithPlayers(players);
     };
 
+    const onPlayerKicked = (reason: string) => {
+      if (!this.scene.isActive() || this.isTransitioning) return;
+      this.isTransitioning = true;
+      this.statusBannerText.setText(reason || '¡HAS SIDO EXPULSADO DE LA SALA!');
+      this.statusBannerText.setColor('#ef4444');
+      if (this.cache.audio.exists('ui_tap')) {
+        this.sound.play('ui_tap', { volume: 0.6 });
+      }
+      this.time.delayedCall(1600, () => {
+        this.cameras.main.fadeOut(250, 15, 23, 42);
+        this.cameras.main.once(Phaser.Cameras.Scene2D.Events.FADE_OUT_COMPLETE, () => {
+          this.scene.start('MenuScene');
+        });
+      });
+    };
+
     peerManager.on('players-updated', onPlayersUpdated);
     peerManager.on('match-start', onMatchStart);
+    peerManager.on('player-kicked', onPlayerKicked);
 
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
       peerManager.off('players-updated', onPlayersUpdated);
       peerManager.off('match-start', onMatchStart);
+      peerManager.off('player-kicked', onPlayerKicked);
+      if (this.copyFeedbackTimer) {
+        this.copyFeedbackTimer.remove(false);
+        this.copyFeedbackTimer = undefined;
+      }
     });
 
     this.renderPlayerCards();
@@ -163,6 +177,11 @@ export class LobbyScene extends Phaser.Scene {
 
   private renderPlayerCards(): void {
     this.playersContainer.removeAll(true);
+
+    if (this.roomCodeText) {
+      const codeDisplay = peerManager.roomCode || 'LOCAL';
+      this.roomCodeText.setText(`CÓDIGO DE SALA:  ${codeDisplay}`);
+    }
 
     const players = peerManager.getPlayersList();
     const bluePlayers = peerManager.getTeamPlayers('blue');
@@ -356,10 +375,13 @@ export class LobbyScene extends Phaser.Scene {
       )
       .setOrigin(0, 0.5);
 
+    const canKick = peerManager.isHost && !profile.isHost;
+    const statusTxtX = canKick ? colX + 158 : colX + 195;
+
     const statusStr = profile.isReady ? '✓ LISTO' : '⏳...';
     const statusColor = profile.isReady ? '#4ade80' : '#facc15';
     const statusTxt = this.add
-      .text(colX + 195, y, statusStr, {
+      .text(statusTxtX, y, statusStr, {
         fontFamily: 'sans-serif',
         fontSize: '13px',
         fontStyle: 'bold',
@@ -370,6 +392,186 @@ export class LobbyScene extends Phaser.Scene {
       .setOrigin(1, 0.5);
 
     this.playersContainer.add([teamBadge, teamLabel, nameTxt, statsTxt, statusTxt]);
+
+    // Botón de expulsión exclusivo para el Host (estilo sobrio y tamaño fijo)
+    if (canKick) {
+      const kickBtnX = colX + 186;
+      const kickBtn = this.add
+        .nineslice(kickBtnX, y, 'ui_sq_red', undefined, 26, 26, 6, 6, 6, 6)
+        .setInteractive({ useHandCursor: true });
+
+      const kickIcon = this.add
+        .text(kickBtnX, y, '✕', {
+          fontFamily: 'sans-serif',
+          fontSize: '13px',
+          fontStyle: 'bold',
+          color: '#ffffff',
+          stroke: '#7f1d1d',
+          strokeThickness: 2
+        })
+        .setOrigin(0.5);
+
+      kickBtn.on('pointerover', () => {
+        kickBtn.setAlpha(0.82);
+      });
+
+      kickBtn.on('pointerout', () => {
+        kickBtn.setAlpha(1);
+      });
+
+      kickBtn.on('pointerdown', () => {
+        kickBtn.setAlpha(0.65);
+      });
+
+      kickBtn.on('pointerup', () => {
+        kickBtn.setAlpha(1);
+        if (this.cache.audio.exists('ui_click')) {
+          this.sound.play('ui_click', { volume: 0.65 });
+        }
+        const kickedName = profile.name;
+        peerManager.kickPlayer(profile.peerId);
+        this.statusBannerText.setText(`Jugador "${kickedName}" expulsado de la sala.`);
+        this.statusBannerText.setColor('#f87171');
+      });
+
+      this.playersContainer.add([kickBtn, kickIcon]);
+    }
+  }
+
+  private createRoomCodeSection(panelX: number, centerY: number): void {
+    const codeDisplay = peerManager.roomCode || 'LOCAL';
+    const totalW = 490;
+    const boxW = 345;
+    const btnW = 133;
+    const boxX = panelX - totalW / 2 + boxW / 2;
+    const btnX = panelX + totalW / 2 - btnW / 2;
+
+    // Caja con el código de sala (hacer clic también copia el código)
+    const codeBoxBg = this.add
+      .nineslice(boxX, centerY, 'ui_panel_grey', undefined, boxW, 46, 16, 16, 16, 16)
+      .setOrigin(0.5)
+      .setInteractive({ useHandCursor: true });
+
+    this.roomCodeText = this.add
+      .text(boxX, centerY, `CÓDIGO DE SALA:  ${codeDisplay}`, {
+        fontFamily: 'sans-serif',
+        fontSize: '18px',
+        fontStyle: 'bold',
+        color: '#0f172a'
+      })
+      .setOrigin(0.5);
+
+    codeBoxBg.on('pointerover', () => {
+      codeBoxBg.setTint(0xf1f5f9);
+    });
+
+    codeBoxBg.on('pointerout', () => {
+      codeBoxBg.clearTint();
+    });
+
+    codeBoxBg.on('pointerup', () => {
+      this.copyRoomCode();
+    });
+
+    // Botón COPIAR
+    this.copyBtnBg = this.add
+      .nineslice(btnX, centerY, 'ui_sq_blue', undefined, btnW, 46, 12, 12, 12, 12)
+      .setOrigin(0.5)
+      .setInteractive({ useHandCursor: true });
+
+    this.copyBtnText = this.add
+      .text(btnX, centerY, 'COPIAR', {
+        fontFamily: 'sans-serif',
+        fontSize: '16px',
+        fontStyle: 'bold',
+        color: '#ffffff',
+        stroke: '#0f172a',
+        strokeThickness: 3
+      })
+      .setOrigin(0.5);
+
+    this.copyBtnBg.on('pointerover', () => {
+      this.copyBtnBg.setTint(0xbae6fd);
+    });
+
+    this.copyBtnBg.on('pointerout', () => {
+      this.copyBtnBg.clearTint();
+    });
+
+    this.copyBtnBg.on('pointerdown', () => {
+      this.copyBtnBg.setScale(0.96);
+    });
+
+    this.copyBtnBg.on('pointerup', () => {
+      this.copyBtnBg.setScale(1);
+      this.copyRoomCode();
+    });
+  }
+
+  private copyRoomCode(): void {
+    const code = peerManager.roomCode || 'LOCAL';
+    if (!code) return;
+
+    const onSuccess = () => {
+      if (this.cache.audio.exists('ui_tap')) {
+        this.sound.play('ui_tap', { volume: 0.5 });
+      }
+      this.triggerCopiedAnimation();
+    };
+
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard
+        .writeText(code)
+        .then(onSuccess)
+        .catch(() => {
+          this.fallbackCopy(code);
+          onSuccess();
+        });
+    } else {
+      this.fallbackCopy(code);
+      onSuccess();
+    }
+  }
+
+  private fallbackCopy(text: string): void {
+    const el = document.createElement('textarea');
+    el.value = text;
+    el.setAttribute('readonly', '');
+    el.style.position = 'absolute';
+    el.style.left = '-9999px';
+    document.body.appendChild(el);
+    el.select();
+    try {
+      document.execCommand('copy');
+    } catch (e) {
+      console.warn('Fallback copy failed', e);
+    }
+    document.body.removeChild(el);
+  }
+
+  private triggerCopiedAnimation(): void {
+    if (this.copyFeedbackTimer) {
+      this.copyFeedbackTimer.remove(false);
+      this.copyFeedbackTimer = undefined;
+    }
+
+    this.copyBtnBg.setTexture('ui_btn_green_up');
+    this.copyBtnText.setText('¡COPIADO! ✓');
+
+    this.tweens.add({
+      targets: [this.copyBtnBg, this.copyBtnText],
+      scaleX: 1.08,
+      scaleY: 1.08,
+      yoyo: true,
+      duration: 120
+    });
+
+    this.copyFeedbackTimer = this.time.delayedCall(2000, () => {
+      if (!this.scene.isActive()) return;
+      this.copyBtnBg.setTexture('ui_sq_blue');
+      this.copyBtnBg.clearTint();
+      this.copyBtnText.setText('COPIAR');
+    });
   }
 
   private launchMatchWithPlayers(players: LobbyPlayerProfile[]): void {

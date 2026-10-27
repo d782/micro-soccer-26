@@ -36,6 +36,8 @@ export interface AuthoritativePlayerSync {
   state: string;
   powerRatio: number;
   powerLabel: string;
+  isStunned?: boolean;
+  stunColor?: number;
 }
 
 export interface AuthoritativeBallSync {
@@ -50,6 +52,15 @@ export interface AuthoritativeBallSync {
   ownerPeerId: string | null;
 }
 
+export interface TackleSyncEvent {
+  seq: number;
+  tacklerPeerId: string;
+  carrierPeerId: string;
+  isSuccess: boolean;
+  x: number;
+  y: number;
+}
+
 export interface MatchSyncPayload {
   players: Record<string, AuthoritativePlayerSync>;
   ball: AuthoritativeBallSync;
@@ -58,6 +69,7 @@ export interface MatchSyncPayload {
   remainingTimeMs: number;
   matchState: 'PLAYING' | 'GOAL_CELEBRATION' | 'FULL_TIME';
   lastGoalTeam: 'blue' | 'red' | null;
+  lastTackle?: TackleSyncEvent | null;
 }
 
 export type NetworkMessage =
@@ -66,7 +78,8 @@ export type NetworkMessage =
   | { type: 'ROOM_STATE'; roomCode: string; players: LobbyPlayerProfile[] }
   | { type: 'START_MATCH'; players: LobbyPlayerProfile[] }
   | { type: 'GUEST_INPUT'; input: RemoteInputPayload }
-  | { type: 'MATCH_SYNC'; sync: MatchSyncPayload };
+  | { type: 'MATCH_SYNC'; sync: MatchSyncPayload }
+  | { type: 'KICK_PLAYER'; peerId: string };
 
 const PEER_PREFIX = 'ss26-room-';
 
@@ -396,6 +409,16 @@ class PeerNetworkManager extends Phaser.Events.EventEmitter {
         }
         break;
       }
+
+      case 'KICK_PLAYER': {
+        if (msg.peerId === this.localPeerId) {
+          this.disconnect();
+          this.emit('player-kicked', 'Has sido expulsado de la sala por el Host.');
+        } else if (this.isHost) {
+          this.kickPlayer(msg.peerId);
+        }
+        break;
+      }
     }
   }
 
@@ -471,6 +494,38 @@ class PeerNetworkManager extends Phaser.Events.EventEmitter {
       this.sendMessage({ type: 'PLAYER_PROFILE', profile: target });
       this.emit('players-updated', this.getPlayersList());
     }
+    return true;
+  }
+
+  /**
+   * Permite al Host expulsar a un jugador de la sala P2P
+   */
+  public kickPlayer(peerId: string): boolean {
+    if (!this.isHost || peerId === this.localPeerId) return false;
+    if (!this.players.has(peerId)) return false;
+
+    // 1. Notificar al jugador y a toda la red que ha sido expulsado
+    this.sendMessage({ type: 'KICK_PLAYER', peerId });
+
+    // 2. Cerrar la conexión DataConnection con el peer tras un pequeño margen
+    const conn = this.connections.get(peerId);
+    if (conn) {
+      setTimeout(() => {
+        try {
+          conn.close();
+        } catch (e) {
+          console.warn('Error cerrando conexion al expulsar:', e);
+        }
+      }, 80);
+      this.connections.delete(peerId);
+    }
+
+    // 3. Eliminar de la lista de jugadores local
+    this.players.delete(peerId);
+
+    // 4. Sincronizar el nuevo estado de la sala a los demás participantes
+    this.broadcastRoomState();
+    this.emit('players-updated', this.getPlayersList());
     return true;
   }
 

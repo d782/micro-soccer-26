@@ -65,6 +65,10 @@ export class Player extends Phaser.GameObjects.Container {
   private walkCycle: number = 0;
   private kickAnimTimer: number = 0;
   private kickCooldownTimer: number = 0;
+  private tackleCooldownTimer: number = 0;
+  private tackleImmunityTimer: number = 0;
+  private stunTimer: number = 0;
+  private stunColor: number = 0xef4444;
 
   // Parámetros físicos derivados de los 5 atributos (Velocidad, Disparo, Defensa, Técnica, Ataque)
   private readonly maxSpeed: number;
@@ -466,6 +470,16 @@ export class Player extends Phaser.GameObjects.Container {
   }
 
   private applyLocomotion(_delta: number, speedMultiplier: number): void {
+    if (this.stunTimer > 0) {
+      // Mientras está aturdido o desestabilizado por el placaje, prevalece la inercia del choque
+      const newVx = Phaser.Math.Linear(this.body.velocity.x, 0, this.decelRate * 0.7);
+      const newVy = Phaser.Math.Linear(this.body.velocity.y, 0, this.decelRate * 0.7);
+      this.body.setVelocity(newVx, newVy);
+      this.bodyGroup.setRotation(this.facingAngle);
+      this.selectionRing.setRotation(this.facingAngle);
+      return;
+    }
+
     const magnitude = Phaser.Math.Clamp(this.currentInputVector.length(), 0, 1);
     const effectiveMaxSpeed = this.maxSpeed * speedMultiplier;
 
@@ -530,6 +544,20 @@ export class Player extends Phaser.GameObjects.Container {
     if (this.kickCooldownTimer > 0) {
       this.kickCooldownTimer = Math.max(0, this.kickCooldownTimer - delta);
     }
+    if (this.tackleCooldownTimer > 0) {
+      this.tackleCooldownTimer = Math.max(0, this.tackleCooldownTimer - delta);
+    }
+    if (this.tackleImmunityTimer > 0) {
+      this.tackleImmunityTimer = Math.max(0, this.tackleImmunityTimer - delta);
+    }
+    if (this.stunTimer > 0) {
+      this.stunTimer = Math.max(0, this.stunTimer - delta);
+      if (this.stunTimer <= 0) {
+        this.torso.clearTint();
+        this.leftFoot.clearTint();
+        this.rightFoot.clearTint();
+      }
+    }
     this.currentInputVector.copy(inputVector);
     this.activeBall = ball;
     this.currentMoveRequest = moveRequest;
@@ -548,7 +576,45 @@ export class Player extends Phaser.GameObjects.Container {
     this.bodyGroup.setRotation(this.facingAngle);
     this.selectionRing.setRotation(this.facingAngle);
     this.setPowerBar(0);
+    this.tackleCooldownTimer = 0;
+    this.tackleImmunityTimer = 0;
+    this.stunTimer = 0;
+    this.torso.clearTint();
+    this.leftFoot.clearTint();
+    this.rightFoot.clearTint();
     this.fsm.setState('IDLE');
+  }
+
+  public canTackle(): boolean {
+    return this.tackleCooldownTimer <= 0 && this.stunTimer <= 0;
+  }
+
+  public isTackleImmune(): boolean {
+    return this.tackleImmunityTimer > 0;
+  }
+
+  public isStunned(): boolean {
+    return this.stunTimer > 0;
+  }
+
+  public triggerTackleCooldown(cooldownMs: number = 1200): void {
+    this.tackleCooldownTimer = cooldownMs;
+  }
+
+  public triggerTackleImmunity(durationMs: number = 380): void {
+    this.tackleImmunityTimer = durationMs;
+  }
+
+  public applyStun(durationMs: number, tintColor: number = 0xef4444): void {
+    this.stunTimer = durationMs;
+    this.stunColor = tintColor;
+    this.torso.setTint(tintColor);
+    this.leftFoot.setTint(tintColor);
+    this.rightFoot.setTint(tintColor);
+  }
+
+  public getStunColor(): number {
+    return this.stunColor;
   }
 
   public getWalkCycle(): number {
@@ -612,6 +678,8 @@ export class Player extends Phaser.GameObjects.Container {
       state: string;
       powerRatio: number;
       powerLabel: string;
+      isStunned?: boolean;
+      stunColor?: number;
     },
     delta: number,
     lerpFactor: number
@@ -633,6 +701,15 @@ export class Player extends Phaser.GameObjects.Container {
     this.selectionRing.setRotation(this.facingAngle);
 
     this.setPowerBar(sync.powerRatio, sync.powerLabel);
+
+    if (sync.isStunned) {
+      this.applyStun(160, sync.stunColor ?? 0xef4444);
+    } else if (this.stunTimer > 0) {
+      this.stunTimer = 0;
+      this.torso.clearTint();
+      this.leftFoot.clearTint();
+      this.rightFoot.clearTint();
+    }
 
     if (sync.state === 'KICKING') {
       this.kickAnimTimer = 140;
